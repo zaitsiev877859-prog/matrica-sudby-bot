@@ -7,7 +7,7 @@ from aiogram.enums import ParseMode
 
 from bot.config import BOT_TOKEN, DATABASE_URL
 from bot.db.pool import close_pool, init_pool
-from bot.handlers import profile, profile_view, rights, stub_sections, support
+from bot.handlers import profile, profile_view, report_demo, rights, stub_sections, support
 
 
 async def main() -> None:
@@ -20,6 +20,7 @@ async def main() -> None:
 
     dp.include_router(profile.router)
     dp.include_router(profile_view.router)
+    dp.include_router(report_demo.router)
     dp.include_router(rights.router)
     dp.include_router(support.router)
     dp.include_router(stub_sections.router)
