@@ -23,7 +23,8 @@ from bot.content.arcana import ARCANA
 from bot.content.karmic_debt import KARMIC_DEBT
 from bot.content.personal_year import PERSONAL_YEAR
 from bot.content.reports_catalog import CHILD_INTRO, POINT_LABELS, REPORTS
-from bot.keyboards import main_menu_keyboard, report_catalog_keyboard
+from bot.handlers import profile_view, rights, stub_sections, support
+from bot.keyboards import MENU_BUTTONS, main_menu_keyboard, report_catalog_keyboard
 
 router = Router(name="report_demo")
 
@@ -149,6 +150,28 @@ def _render_ya03(birth_date: date, year: int) -> str:
     return "\n".join(lines)
 
 
+async def _handle_menu_interrupt(message: Message, state: FSMContext) -> bool:
+    """Если во время сбора дат/года для отчёта пришёл текст одной из кнопок главного
+    меню - прерываем текущий сценарий вместо попытки разобрать кнопку как дату/год."""
+    text = message.text
+    if text not in MENU_BUTTONS:
+        return False
+
+    await state.clear()
+
+    if text == "Создать отчёт":
+        await open_catalog(message, state)
+    elif text == "Профиль":
+        await profile_view.show_profile(message)
+    elif text == "Мои права":
+        await rights.show_rights(message)
+    elif text == "Поддержка":
+        await support.support_stub(message)
+    else:  # История, Тарифы - заглушки
+        await stub_sections.section_stub(message)
+    return True
+
+
 @router.message(F.text == "Создать отчёт")
 async def open_catalog(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -195,6 +218,9 @@ async def choose_report(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(ReportForm.waiting_date_a)
 async def handle_date_a(message: Message, state: FSMContext) -> None:
+    if await _handle_menu_interrupt(message, state):
+        return
+
     parsed = _parse_date(message.text or "")
     if parsed is None:
         await message.answer(f"Не получилось разобрать дату. Формат: ДД.ММ.ГГГГ, не раньше {MIN_YEAR} года и не в будущем.")
@@ -236,6 +262,9 @@ async def handle_date_a(message: Message, state: FSMContext) -> None:
 
 @router.message(ReportForm.waiting_date_b)
 async def handle_date_b(message: Message, state: FSMContext) -> None:
+    if await _handle_menu_interrupt(message, state):
+        return
+
     parsed = _parse_date(message.text or "")
     if parsed is None:
         await message.answer(f"Не получилось разобрать дату. Формат: ДД.ММ.ГГГГ, не раньше {MIN_YEAR} года и не в будущем.")
@@ -252,6 +281,9 @@ async def handle_date_b(message: Message, state: FSMContext) -> None:
 
 @router.message(ReportForm.waiting_forecast_year)
 async def handle_forecast_year(message: Message, state: FSMContext) -> None:
+    if await _handle_menu_interrupt(message, state):
+        return
+
     text = (message.text or "").strip()
     data = await state.get_data()
     report_key = data["report_key"]
@@ -287,6 +319,9 @@ async def handle_forecast_year(message: Message, state: FSMContext) -> None:
 
 @router.message(ReportForm.waiting_all_pair_date)
 async def handle_all_pair_date(message: Message, state: FSMContext) -> None:
+    if await _handle_menu_interrupt(message, state):
+        return
+
     text = (message.text or "").strip()
     data = await state.get_data()
     date_a = date.fromisoformat(data["date_a"])
