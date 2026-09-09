@@ -1,9 +1,9 @@
 """МН-01 «Создать отчёт» - рабочий демо-расчёт по каталогу 11 отчётов.
 
-Только расчётный движок (Я01/Я02 из 07-chernovaya-sborka-otchetov.md, Я03 из
-02c-metodika-klassicheskaya-numerologiya.md) и черновые тексты 06-teksty-lichnoe-yadro.md.
-Без прав/резерваций/PDF/персистентности операции - это следующие этапы (см. 04c).
-Выбор только одного отчёта за раз; несколько отчётов в одной операции - следующий шаг.
+Расчётный движок (Я01/Я02 из 07-chernovaya-sborka-otchetov.md, Я03 из
+02c-metodika-klassicheskaya-numerologiya.md), черновые тексты 06-teksty-lichnoe-yadro.md
+и черновой PDF (bot/pdf/generator.py) на каждый отчёт. Без прав/резерваций/персистентности
+операции в БД (ДН-02/03/04/09) - это следующие этапы (см. 04c).
 """
 
 from datetime import date, datetime
@@ -11,7 +11,7 @@ from datetime import date, datetime
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from bot.calculations.personal_core import (
     karmic_debt_numbers,
@@ -23,8 +23,11 @@ from bot.content.arcana import ARCANA
 from bot.content.karmic_debt import KARMIC_DEBT
 from bot.content.personal_year import PERSONAL_YEAR
 from bot.content.reports_catalog import CHILD_INTRO, POINT_LABELS, REPORTS
+from bot.db import repo
+from bot.db.pool import get_pool
 from bot.handlers import profile_view, rights, stub_sections, support
 from bot.keyboards import MENU_BUTTONS, main_menu_keyboard, report_catalog_keyboard
+from bot.pdf.generator import build_report_pdf
 
 router = Router(name="report_demo")
 
@@ -93,7 +96,7 @@ def _render_ya01(meta: dict, birth_date: date) -> str:
                 lines.append(f"№{number}, {KARMIC_DEBT[number]['title']}")
             lines.append("")
 
-    lines.append("Черновой расчёт для проверки движка. PDF, комментарий специалиста, права и оплата - следующие этапы.")
+    lines.append("Черновой расчёт для проверки движка. Комментарий специалиста, права и оплата - следующие этапы.")
     return "\n".join(lines)
 
 
@@ -129,7 +132,7 @@ def _render_ya02(meta: dict, date_a: date, date_b: date) -> str:
         "[предположение] Здесь показано упрощённое двоичное сравнение (совпадают/расходятся); "
         "средняя градация «близки» из 07 требует числового порога, который ещё не определён."
     )
-    lines.append("Черновой расчёт для проверки движка. PDF, права и оплата - следующие этапы.")
+    lines.append("Черновой расчёт для проверки движка. Права и оплата - следующие этапы.")
     return "\n".join(lines)
 
 
@@ -145,9 +148,25 @@ def _render_ya03(birth_date: date, year: int) -> str:
         f"Тема года: {info['theme']}",
         f"На что обратить внимание: {info['watch']}",
         "",
-        "Черновой расчёт для проверки движка. PDF, права и оплата - следующие этапы.",
+        "Черновой расчёт для проверки движка. Права и оплата - следующие этапы.",
     ]
     return "\n".join(lines)
+
+
+async def _get_specialist_name(telegram_id: int) -> str:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        specialist = await repo.get_specialist_by_telegram_id(conn, telegram_id)
+    if specialist and specialist["display_name"]:
+        return specialist["display_name"]
+    return "Специалист"
+
+
+async def _send_report(message: Message, title: str, text: str, specialist_name: str) -> None:
+    """Отправляет текст отчёта в чат и отдельным файлом - черновой PDF (Д02)."""
+    await message.answer(text)
+    pdf_bytes = build_report_pdf(title, specialist_name, text.split("\n"))
+    await message.answer_document(BufferedInputFile(pdf_bytes, filename=f"{title}.pdf"))
 
 
 async def _handle_menu_interrupt(message: Message, state: FSMContext) -> bool:
@@ -176,7 +195,7 @@ async def _handle_menu_interrupt(message: Message, state: FSMContext) -> bool:
 async def open_catalog(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Демо-режим: расчёт по 11 отчётам работает, PDF/права/несколько отчётов сразу - "
+        "Демо-режим: расчёт и черновой PDF по 11 отчётам работают, права/оплата/история - "
         "следующие этапы. Выбери отчёт:",
         reply_markup=report_catalog_keyboard(),
     )
@@ -230,9 +249,11 @@ async def handle_date_a(message: Message, state: FSMContext) -> None:
     report_key = data["report_key"]
 
     if report_key == "all":
-        await state.update_data(date_a=parsed.isoformat())
+        specialist_name = await _get_specialist_name(message.from_user.id)
+        await state.update_data(date_a=parsed.isoformat(), specialist_name=specialist_name)
         for key in YA01_KEYS:
-            await message.answer(_render_ya01(REPORTS[key], parsed))
+            meta = REPORTS[key]
+            await _send_report(message, meta["title"], _render_ya01(meta, parsed), specialist_name)
         await state.set_state(ReportForm.waiting_forecast_year)
         await message.answer(
             "7 отчётов личного ядра отправлены выше. Теперь прогноз (отчёт 13) - "
@@ -244,8 +265,10 @@ async def handle_date_a(message: Message, state: FSMContext) -> None:
 
     if meta["core"] == "я01":
         text = _render_ya01(meta, parsed)
+        specialist_name = await _get_specialist_name(message.from_user.id)
         await state.clear()
-        await message.answer(text, reply_markup=main_menu_keyboard())
+        await _send_report(message, meta["title"], text, specialist_name)
+        await message.answer("Готово.", reply_markup=main_menu_keyboard())
         return
 
     if meta["core"] == "я02":
@@ -275,8 +298,10 @@ async def handle_date_b(message: Message, state: FSMContext) -> None:
     date_a = date.fromisoformat(data["date_a"])
 
     text = _render_ya02(meta, date_a, parsed)
+    specialist_name = await _get_specialist_name(message.from_user.id)
     await state.clear()
-    await message.answer(text, reply_markup=main_menu_keyboard())
+    await _send_report(message, meta["title"], text, specialist_name)
+    await message.answer("Готово.", reply_markup=main_menu_keyboard())
 
 
 @router.message(ReportForm.waiting_forecast_year)
@@ -305,7 +330,8 @@ async def handle_forecast_year(message: Message, state: FSMContext) -> None:
     text_out = _render_ya03(birth_date, int(text))
 
     if report_key == "all":
-        await message.answer(text_out)
+        specialist_name = data.get("specialist_name") or await _get_specialist_name(message.from_user.id)
+        await _send_report(message, REPORTS["ot13"]["title"], text_out, specialist_name)
         await state.set_state(ReportForm.waiting_all_pair_date)
         await message.answer(
             "Прогноз отправлен выше. Хочешь добавить дату второго человека для 3 отчётов "
@@ -313,8 +339,10 @@ async def handle_forecast_year(message: Message, state: FSMContext) -> None:
         )
         return
 
+    specialist_name = await _get_specialist_name(message.from_user.id)
     await state.clear()
-    await message.answer(text_out, reply_markup=main_menu_keyboard())
+    await _send_report(message, REPORTS["ot13"]["title"], text_out, specialist_name)
+    await message.answer("Готово.", reply_markup=main_menu_keyboard())
 
 
 @router.message(ReportForm.waiting_all_pair_date)
@@ -342,8 +370,10 @@ async def handle_all_pair_date(message: Message, state: FSMContext) -> None:
         )
         return
 
+    specialist_name = data.get("specialist_name") or await _get_specialist_name(message.from_user.id)
     for key in YA02_KEYS:
-        await message.answer(_render_ya02(REPORTS[key], date_a, parsed))
+        meta = REPORTS[key]
+        await _send_report(message, meta["title"], _render_ya02(meta, date_a, parsed), specialist_name)
 
     await state.clear()
     await message.answer("Все 11 отчётов отправлены.", reply_markup=main_menu_keyboard())
