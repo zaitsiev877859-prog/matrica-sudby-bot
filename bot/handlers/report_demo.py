@@ -36,6 +36,11 @@ class ReportForm(StatesGroup):
     waiting_date_a = State()
     waiting_date_b = State()
     waiting_forecast_year = State()
+    waiting_all_pair_date = State()
+
+
+YA01_KEYS = [key for key, meta in REPORTS.items() if meta["core"] == "я01"]
+YA02_KEYS = [key for key, meta in REPORTS.items() if meta["core"] == "я02"]
 
 
 def _parse_date(text: str) -> date | None:
@@ -157,26 +162,32 @@ async def open_catalog(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("report:"))
 async def choose_report(callback: CallbackQuery, state: FSMContext) -> None:
     report_key = callback.data.split(":", 1)[1]
-    meta = REPORTS.get(report_key)
-    if meta is None:
+
+    if report_key != "all" and report_key not in REPORTS:
         await callback.answer("Неизвестный отчёт.", show_alert=True)
         return
 
-    await state.update_data(report_key=report_key)
     await callback.answer()
+    await state.update_data(report_key=report_key)
+    await state.set_state(ReportForm.waiting_date_a)
 
+    if report_key == "all":
+        await callback.message.answer(
+            "Все 11 отчётов сразу. Сначала дата рождения основного человека - по ней "
+            "посчитаются 7 отчётов личного ядра. Формат ДД.ММ.ГГГГ."
+        )
+        return
+
+    meta = REPORTS[report_key]
     if meta["core"] == "я02":
-        await state.set_state(ReportForm.waiting_date_a)
         await callback.message.answer(
             f"«{meta['title']}». Введи дату рождения первого участника в формате ДД.ММ.ГГГГ."
         )
     elif meta["core"] == "я03":
-        await state.set_state(ReportForm.waiting_date_a)
         await callback.message.answer(
             f"«{meta['title']}». Введи дату рождения в формате ДД.ММ.ГГГГ."
         )
     else:
-        await state.set_state(ReportForm.waiting_date_a)
         await callback.message.answer(
             f"«{meta['title']}». Введи дату рождения в формате ДД.ММ.ГГГГ, например 15.06.1990."
         )
@@ -190,7 +201,20 @@ async def handle_date_a(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    meta = REPORTS[data["report_key"]]
+    report_key = data["report_key"]
+
+    if report_key == "all":
+        await state.update_data(date_a=parsed.isoformat())
+        for key in YA01_KEYS:
+            await message.answer(_render_ya01(REPORTS[key], parsed))
+        await state.set_state(ReportForm.waiting_forecast_year)
+        await message.answer(
+            "7 отчётов личного ядра отправлены выше. Теперь прогноз (отчёт 13) - "
+            "на какой год посчитать? Введи год, например 2026, или напиши «Пропустить»."
+        )
+        return
+
+    meta = REPORTS[report_key]
 
     if meta["core"] == "я01":
         text = _render_ya01(meta, parsed)
@@ -229,13 +253,62 @@ async def handle_date_b(message: Message, state: FSMContext) -> None:
 @router.message(ReportForm.waiting_forecast_year)
 async def handle_forecast_year(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    if not text.isdigit() or not (MIN_YEAR <= int(text) <= MAX_FORECAST_YEAR):
-        await message.answer(f"Введи год числом, от {MIN_YEAR} до {MAX_FORECAST_YEAR}.")
-        return
-
     data = await state.get_data()
+    report_key = data["report_key"]
     birth_date = date.fromisoformat(data["date_a"])
 
+    if report_key == "all" and text == "Пропустить":
+        await state.set_state(ReportForm.waiting_all_pair_date)
+        await message.answer(
+            "Прогноз пропущен. Хочешь добавить дату второго человека для 3 отчётов "
+            "совместимости? Пришли дату ДД.ММ.ГГГГ или напиши «Пропустить»."
+        )
+        return
+
+    if not text.isdigit() or not (MIN_YEAR <= int(text) <= MAX_FORECAST_YEAR):
+        hint = ", или «Пропустить»." if report_key == "all" else "."
+        await message.answer(f"Введи год числом, от {MIN_YEAR} до {MAX_FORECAST_YEAR}{hint}")
+        return
+
     text_out = _render_ya03(birth_date, int(text))
+
+    if report_key == "all":
+        await message.answer(text_out)
+        await state.set_state(ReportForm.waiting_all_pair_date)
+        await message.answer(
+            "Прогноз отправлен выше. Хочешь добавить дату второго человека для 3 отчётов "
+            "совместимости? Пришли дату ДД.ММ.ГГГГ или напиши «Пропустить»."
+        )
+        return
+
     await state.clear()
     await message.answer(text_out, reply_markup=main_menu_keyboard())
+
+
+@router.message(ReportForm.waiting_all_pair_date)
+async def handle_all_pair_date(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    date_a = date.fromisoformat(data["date_a"])
+
+    if text == "Пропустить":
+        await state.clear()
+        await message.answer(
+            "Отчёты совместимости пропущены. Все выбранные отчёты отправлены.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    parsed = _parse_date(text)
+    if parsed is None:
+        await message.answer(
+            f"Не получилось разобрать дату. Формат: ДД.ММ.ГГГГ, не раньше {MIN_YEAR} года "
+            "и не в будущем, или «Пропустить»."
+        )
+        return
+
+    for key in YA02_KEYS:
+        await message.answer(_render_ya02(REPORTS[key], date_a, parsed))
+
+    await state.clear()
+    await message.answer("Все 11 отчётов отправлены.", reply_markup=main_menu_keyboard())

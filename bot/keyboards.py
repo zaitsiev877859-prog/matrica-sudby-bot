@@ -29,6 +29,7 @@ def skip_keyboard(button_text: str = "Пропустить") -> ReplyKeyboardMar
 
 def report_catalog_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.button(text="Все 11 отчётов сразу", callback_data="report:all")
     for key, meta in REPORTS.items():
         builder.button(text=meta["title"], callback_data=f"report:{key}")
     builder.adjust(1)
