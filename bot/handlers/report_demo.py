@@ -27,7 +27,7 @@ from bot.db import repo
 from bot.db.pool import get_pool
 from bot.handlers import profile_view, rights, stub_sections, support
 from bot.keyboards import MENU_BUTTONS, main_menu_keyboard, report_catalog_keyboard
-from bot.pdf.generator import build_report_pdf
+from bot.pdf.generator import build_matrix_diagram, build_report_pdf
 
 router = Router(name="report_demo")
 
@@ -57,7 +57,7 @@ def _parse_date(text: str) -> date | None:
     return parsed
 
 
-def _render_ya01(meta: dict, birth_date: date) -> str:
+def _render_ya01(meta: dict, birth_date: date) -> tuple[str, object]:
     points = personal_core_points(birth_date)
     karmic = karmic_debt_numbers(birth_date)
 
@@ -97,7 +97,7 @@ def _render_ya01(meta: dict, birth_date: date) -> str:
             lines.append("")
 
     lines.append("Черновой расчёт для проверки движка. Комментарий специалиста, права и оплата - следующие этапы.")
-    return "\n".join(lines)
+    return "\n".join(lines), points
 
 
 def _render_ya02(meta: dict, date_a: date, date_b: date) -> str:
@@ -162,10 +162,14 @@ async def _get_specialist_name(telegram_id: int) -> str:
     return "Специалист"
 
 
-async def _send_report(message: Message, title: str, text: str, specialist_name: str) -> None:
-    """Отправляет текст отчёта в чат и отдельным файлом - черновой PDF (Д02)."""
+async def _send_report(
+    message: Message, title: str, text: str, specialist_name: str, points=None
+) -> None:
+    """Отправляет текст отчёта в чат и отдельным файлом - черновой PDF (Д02).
+    points - точки личного ядра для графической схемы (только для полных отчётов Я01)."""
     await message.answer(text)
-    pdf_bytes = build_report_pdf(title, specialist_name, text.split("\n"))
+    diagram = build_matrix_diagram(points) if points is not None else None
+    pdf_bytes = build_report_pdf(title, specialist_name, text.split("\n"), diagram=diagram)
     await message.answer_document(BufferedInputFile(pdf_bytes, filename=f"{title}.pdf"))
 
 
@@ -253,7 +257,11 @@ async def handle_date_a(message: Message, state: FSMContext) -> None:
         await state.update_data(date_a=parsed.isoformat(), specialist_name=specialist_name)
         for key in YA01_KEYS:
             meta = REPORTS[key]
-            await _send_report(message, meta["title"], _render_ya01(meta, parsed), specialist_name)
+            text, points = _render_ya01(meta, parsed)
+            await _send_report(
+                message, meta["title"], text, specialist_name,
+                points=points if meta.get("full") else None,
+            )
         await state.set_state(ReportForm.waiting_forecast_year)
         await message.answer(
             "7 отчётов личного ядра отправлены выше. Теперь прогноз (отчёт 13) - "
@@ -264,10 +272,13 @@ async def handle_date_a(message: Message, state: FSMContext) -> None:
     meta = REPORTS[report_key]
 
     if meta["core"] == "я01":
-        text = _render_ya01(meta, parsed)
+        text, points = _render_ya01(meta, parsed)
         specialist_name = await _get_specialist_name(message.from_user.id)
         await state.clear()
-        await _send_report(message, meta["title"], text, specialist_name)
+        await _send_report(
+            message, meta["title"], text, specialist_name,
+            points=points if meta.get("full") else None,
+        )
         await message.answer("Готово.", reply_markup=main_menu_keyboard())
         return
 
